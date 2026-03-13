@@ -31,7 +31,7 @@ cells.append(md("""# Card Spend Intelligence V4 — Production Master Notebook
 ```
 Transactions
 → Merchant Normalization + Token Extraction
-→ Deterministic Merchant Intelligence (120+ Thailand rules)
+→ Deterministic Merchant Intelligence (135+ Thailand rules)
 → Taxonomy Reconciliation (Rules > Mobius > B2K > Fallback)
 → Channel / Geography / Structural Tags
 → Behavioral Transaction Tags + Recurrence Detection
@@ -462,7 +462,7 @@ merchant_rules = [
     (79, "ESSO",          "\\\\besso\\\\b|exxon",                        "EVERYDAY_ESSENTIALS", "FUEL", "FUEL_STATION"),
     (80, "SUSCO",         "susco",                                    "EVERYDAY_ESSENTIALS", "FUEL", "FUEL_STATION"),
 
-    # ── PHARMACY / HEALTH (82-89) ────────────────────────────
+    # ── PHARMACY / HEALTH / PERSONAL CARE (82-99b) ──────────
     (82, "BOOTS",         "\\\\bboots\\\\b",                              "EVERYDAY_ESSENTIALS", "PHARMACY_DRUGSTORE", "PHARMACY_CHAIN"),
     (83, "WATSONS",       "watsons|watson",                           "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "BEAUTY_RETAIL"),
     (84, "FASCINO",       "fascino",                                  "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "BEAUTY_RETAIL"),
@@ -471,6 +471,24 @@ merchant_rules = [
     (87, "SAMITIVEJ",     "samitivej",                                "HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "HOSPITAL_PRIVATE"),
     (88, "BNH",           "\\\\bbnh\\\\b",                                "HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "HOSPITAL_PRIVATE"),
     (89, "BEAUTY_SPA",    "spa\\\\b|massage|onsen|let.s relax",        "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "SPA_WELLNESS"),
+
+    # ── INCREMENTAL: Healthcare gaps ─────────────────────────
+    # Generic hospital/clinic/lab patterns (lower priority than named hospitals above)
+    (240,"HOSPITAL_GEN",  "hospital|\\\\bhosp\\\\b|medical\\\\s?center",  "HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "HOSPITAL_GENERAL"),
+    (241,"CLINIC_GEN",    "clinic(?!.*beauty|.*cosmetic|.*skin|.*derma)","HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "CLINIC_GENERAL"),
+    (242,"DIAGNOSTIC_LAB","\\\\blab\\\\b|laboratory|diagnostic|pathology|radiology|x-?ray|mri\\\\b|ct\\\\s?scan",
+                                                                      "HEALTH_WELLNESS", "DIAGNOSTICS",       "DIAGNOSTIC_LAB"),
+    (243,"DENTAL",        "dental|dentist|orthodont|\\\\btooth\\\\b",    "HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "DENTAL_CLINIC"),
+    (244,"OPTICAL",       "optical|optician|eye\\\\s?care|\\\\blens\\\\b|spec\\\\s?saver|top\\\\s?charoen",
+                                                                      "HEALTH_WELLNESS", "HOSPITAL_CLINIC",   "OPTICAL_CLINIC"),
+
+    # ── INCREMENTAL: Personal care gaps ──────────────────────
+    (245,"SALON",         "salon|hair\\\\s?(cut|dresser|studio)|barber|\\\\bcuts\\\\b",
+                                                                      "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "BEAUTY_SALON"),
+    (246,"COSMETIC_CLIN", "cosmetic\\\\s?clinic|skin\\\\s?clinic|dermatolog|aesthetic|laser\\\\s?clinic|botox",
+                                                                      "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "COSMETIC_CLINIC"),
+    (247,"NAIL_BEAUTY",   "nail\\\\s?(salon|spa|bar)|manicure|pedicure|wax(ing)?\\\\b",
+                                                                      "HEALTH_WELLNESS", "BEAUTY_WELLNESS",   "BEAUTY_SALON"),
 
     # ── MALLS / DEPARTMENT STORES (90-99) ────────────────────
     (90, "CENTRAL_MALL",  "central\\\\s?(world|embassy|chidlom|plaza|ladprao|pinklao|rama|westgate|festival|village)",
@@ -626,6 +644,18 @@ merchant_rules = [
                                                                       "EVERYDAY_ESSENTIALS", "UTILITIES", "WATER_ELECTRIC_GAS"),
     (236,"WATER",         "waterworks|water\\\\s?supply|mwa\\\\b|pwa\\\\b",
                                                                       "EVERYDAY_ESSENTIALS", "UTILITIES", "WATER_ELECTRIC_GAS"),
+
+    # ── INCREMENTAL: Utility & government payment gaps ───────
+    (248,"GAS_UTILITY",   "ptt\\\\s?gas|\\\\bgas\\\\s?(supply|authority)\\\\b|\\\\bngv\\\\b",
+                                                                      "EVERYDAY_ESSENTIALS", "UTILITIES", "WATER_ELECTRIC_GAS"),
+    (249,"GOVT_PAYMENT",  "counter\\\\s?service|pay\\\\s?at\\\\s?post|bill\\\\s?payment|\\\\bbill\\\\s?pay\\\\b",
+                                                                      "B2B_PROFESSIONAL", "GOVERNMENT", "GOVERNMENT_SERVICE"),
+    (250,"INTERNET_ISP",  "\\\\bcat\\\\s?telecom|nt\\\\s?broadband|true\\\\s?internet|\\\\bjasmine\\\\b",
+                                                                      "DIGITAL_SERVICES", "TELCO_BROADBAND", "TELCO_BROADBAND_PROVIDER"),
+
+    # ── INCREMENTAL: Pet & veterinary ────────────────────────
+    (251,"PET_VET",       "pet\\\\s?(shop|store|hospital)|veterinar|vet\\\\s?clinic|\\\\bpet\\\\b.*mart",
+                                                                      "EVERYDAY_ESSENTIALS", "PET_ANIMAL", "PET_CARE"),
 ]
 
 rule_schema = StructType([
@@ -908,11 +938,32 @@ txn4 = (
     .withColumn("is_mall_pattern",
         F.when(F.col("match_text").rlike("|".join(MALL_PATTERNS)), F.lit(1)).otherwise(F.lit(0))
     )
+    # ── Platform ecosystem detection (does NOT change taxonomy) ──
+    # Identifies which super-app / platform ecosystem a transaction belongs to.
+    # Orthogonal to L1/L2/L3 — a GrabFood txn is FOOD_DINING.FOOD_DELIVERY + GRAB_PLATFORM.
+    .withColumn("platform_ecosystem",
+        F.when(F.col("match_text").rlike("grab|grabfood|grabtaxi|grabcar|grabpay|grab\\\\s?(express|mart|reward)"),
+               F.lit("GRAB_PLATFORM"))
+         .when(F.col("match_text").rlike("line|lineman|linepay|line\\\\s?(man|pay|sticker|tv|game|webtoon)|rabbit\\\\s?line"),
+               F.lit("LINE_PLATFORM"))
+         .when(F.col("match_text").rlike("shopee|shopeepay|shopee\\\\s?(pay|mall|food)"),
+               F.lit("SHOPEE_PLATFORM"))
+         .when(F.col("match_text").rlike("true|truemoney|true\\\\s?(money|move|coffee|id|online|vision|wallet)"),
+               F.lit("TRUE_PLATFORM"))
+         .when(F.col("match_text").rlike("lazada"),
+               F.lit("LAZADA_PLATFORM"))
+         .when(F.col("match_text").rlike("robinhood"),
+               F.lit("ROBINHOOD_PLATFORM"))
+         .when(F.col("match_text").rlike("\\\\bkbank\\\\b|k\\\\s?plus|kplus|k\\\\+"),
+               F.lit("KBANK_PLATFORM"))
+         .otherwise(F.lit("NONE"))
+    )
 )
 
 display(txn4.select("mcht_nm_norm", "channel_tag", "geo_tag", "is_topup", "is_wallet",
                      "is_premium_merchant", "is_food_delivery", "is_ride_hailing",
-                     "is_subscription", "is_grocery", "is_risky_merchant").limit(30))
+                     "is_subscription", "is_grocery", "is_risky_merchant",
+                     "platform_ecosystem").limit(30))
 """))
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1402,7 +1453,47 @@ for col_name in l1_spend_cols:
     ).otherwise(F.lit(0))
 cust_month = cust_month.withColumn("category_breadth_m", breadth_expr)
 
-display(cust_month.select("CUST_NUM", "txn_month", "dominant_ecosystem", "second_ecosystem", "category_breadth_m").limit(20))
+# ── Platform ecosystem spend aggregation ──
+# Count distinct platforms used and dominant platform per customer-month.
+# Uses the platform_ecosystem tag from Cell 11 (orthogonal to L1/L2/L3 taxonomy).
+platform_agg = (
+    spark.table(PHASE1_OUTPUT_TABLE)
+    .filter(F.col("platform_ecosystem") != "NONE")
+    .groupBy("CUST_NUM", "txn_month")
+    .agg(
+        F.countDistinct("platform_ecosystem").alias("platform_count_m"),
+        F.sum("txn_amount").alias("platform_spend_m"),
+        F.count("*").alias("platform_txn_cnt_m"),
+    )
+)
+
+# Dominant platform per customer-month (by spend)
+w_plat = Window.partitionBy("CUST_NUM", "txn_month").orderBy(F.desc("_plat_spend"))
+platform_dominant = (
+    spark.table(PHASE1_OUTPUT_TABLE)
+    .filter(F.col("platform_ecosystem") != "NONE")
+    .groupBy("CUST_NUM", "txn_month", "platform_ecosystem")
+    .agg(F.sum("txn_amount").alias("_plat_spend"))
+    .withColumn("_pr", F.row_number().over(w_plat))
+    .filter(F.col("_pr") == 1)
+    .select("CUST_NUM", "txn_month", F.col("platform_ecosystem").alias("dominant_platform"))
+)
+
+cust_month = (
+    cust_month
+    .join(platform_agg, ["CUST_NUM", "txn_month"], "left")
+    .join(platform_dominant, ["CUST_NUM", "txn_month"], "left")
+    .fillna({"platform_count_m": 0, "platform_spend_m": 0.0, "platform_txn_cnt_m": 0})
+    .withColumn("dominant_platform", F.coalesce(F.col("dominant_platform"), F.lit("NONE")))
+    .withColumn("platform_share_m",
+        F.when(F.col("spend_amt_m") > 0,
+               F.col("platform_spend_m") / F.col("spend_amt_m")
+        ).otherwise(0.0)
+    )
+)
+
+display(cust_month.select("CUST_NUM", "txn_month", "dominant_ecosystem", "second_ecosystem",
+                           "category_breadth_m", "dominant_platform", "platform_count_m", "platform_share_m").limit(20))
 """))
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2442,6 +2533,7 @@ campaign_view = (
         "merchant_churn_rate_m", "merchant_retention_rate_m",
         "spend_velocity_m", "spend_acceleration_m",
         "dominant_ecosystem", "second_ecosystem", "category_breadth_m",
+        "dominant_platform", "platform_count_m", "platform_share_m",
         "l1_migration_flag", "diversification_flag",
         "spend_regime", "feature_quality_flag",
         # Rolling
@@ -2582,17 +2674,17 @@ cells.append(md("""## Final Audit Summary
 |---|---|
 | **Merchant normalization** | Multi-step: lowercase, whitespace, noise symbols, branch/city removal, SHA-256 key |
 | **Token extraction** | Split tokens, brand root, token count |
-| **Taxonomy hierarchy** | 13 L1 × 42 L2 × 65+ L3 archetypes |
-| **Deterministic rules** | ~120 Thailand-specific merchant regex rules with priority |
+| **Taxonomy hierarchy** | 13 L1 × 45 L2 × 75+ L3 archetypes |
+| **Deterministic rules** | ~135 Thailand-specific merchant regex rules with priority |
 | **Source reconciliation** | MERCHANT_RULE > MOBIUS > B2K > UNCLASSIFIED with conflict flags |
 | **Channel/geo tags** | ONLINE/OFFLINE/IN_APP, DOMESTIC/CROSS_BORDER |
-| **Structural flags** | is_topup, is_wallet, is_processor, is_marketplace, is_mall, is_premium, is_ride_hailing, is_subscription, is_grocery, is_risky_merchant, is_mall_pattern |
+| **Structural flags** | is_topup, is_wallet, is_processor, is_marketplace, is_mall, is_premium, is_ride_hailing, is_subscription, is_grocery, is_risky_merchant, is_mall_pattern, platform_ecosystem |
 | **Behavioral tags** | Size tier, 6 granular time patterns (morning/late-morning/lunch/afternoon/evening/late-night), weekpart, day-of-week, payday window, business proxy, travel booking |
 | **Recurrence engine** | CV-based (< 0.25 for subscriptions), amount stability, visit count |
 | **Customer-month features** | 110+ features spanning foundation, composition, intelligence, risk, behavioral |
 | **Merchant intelligence** | Entropy, HHI, top1/top3 share, scale, loyalty, novelty, turnover, churn, retention, repeat ratio |
 | **Consumption metrics** | consumption_spend_m (ex-topup), txn_per_active_day_m, spend_vs_3m_avg_ratio |
-| **L1 spend composition** | 12 ecosystem shares + dominant/secondary + category breadth |
+| **L1 spend composition** | 12 ecosystem shares + dominant/secondary + category breadth + platform ecosystem (Grab/LINE/Shopee/True/Lazada/Robinhood/KBank) |
 | **L2 key shares** | 21 key category shares for campaigns/pricing |
 | **Recurrence features** | Subscription/recurring merchant counts, spend shares, interval stats |
 | **Wallet/payment** | Wallet dependence, topup heavy, processor mediated flags |
@@ -2620,6 +2712,10 @@ cells.append(md("""## Final Audit Summary
   duplicate aggregation). Added consumption_spend_m, txn_per_active_day_m, merchant_repeat_ratio_m,
   merchant_novelty_rate_m, merchant_churn/retention_rate_m, spend_vs_3m_avg_ratio,
   numeric persona_confidence_score. Expanded campaign_view with new features.
+- **Taxonomy coverage audit:** Added 12 incremental rules for healthcare gaps (generic hospital/clinic/
+  diagnostic/dental/optical), personal care (salon/cosmetic clinic/nail), utilities (gas/ISP/bill pay),
+  and pet/vet. Added platform_ecosystem column (Grab/LINE/Shopee/True/Lazada/Robinhood/KBank)
+  with customer-month aggregation (dominant_platform, platform_count_m, platform_share_m).
 
 ### Intentionally deferred
 1. **ML-based merchant classification** — requires labeled training data; deterministic rules serve as Phase 1.
